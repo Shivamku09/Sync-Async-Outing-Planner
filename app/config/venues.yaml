@@ -1,0 +1,51 @@
+venues:
+  - id: "10000000-0000-0000-0000-000000000001"
+    name: Cubbon Park
+    area: Central Bengaluru
+    tags: [nature, walking, family]
+    estimated_cost_inr: 200
+    capacity: 100
+    min_age: 1
+    max_age: 120
+    open_days: [all]
+    active: true
+  - id: "10000000-0000-0000-0000-000000000002"
+    name: Visvesvaraya Industrial and Technological Museum
+    area: Central Bengaluru
+    tags: [science, museum, family]
+    estimated_cost_inr: 500
+    capacity: 50
+    min_age: 5
+    max_age: 120
+    open_days: [weekday, weekend]
+    active: true
+  - id: "10000000-0000-0000-0000-000000000003"
+    name: Bangalore Palace
+    area: Vasanth Nagar
+    tags: [history, architecture, culture]
+    estimated_cost_inr: 800
+    capacity: 40
+    min_age: 5
+    max_age: 120
+    open_days: [weekday, weekend]
+    active: true
+  - id: "10000000-0000-0000-0000-000000000004"
+    name: Bannerghatta Biological Park
+    area: Bannerghatta
+    tags: [wildlife, nature, family]
+    estimated_cost_inr: 1200
+    capacity: 80
+    min_age: 3
+    max_age: 120
+    open_days: [weekday, weekend]
+    active: true
+  - id: "10000000-0000-0000-0000-000000000005"
+    name: Wonderla Bengaluru
+    area: Mysore Road
+    tags: [adventure, rides, family]
+    estimated_cost_inr: 2500
+    capacity: 100
+    min_age: 8
+    max_age: 65
+    open_days: [weekday, weekend]
+    active: true

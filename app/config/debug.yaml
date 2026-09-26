@@ -1,0 +1,5 @@
+application:
+  environment: debug
+
+callback:
+  allow_localhost: true

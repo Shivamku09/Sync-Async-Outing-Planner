@@ -48,8 +48,8 @@ Clients may want the plan **immediately** (sync) or **submit and check later** (
 | Topic         | Decision                                                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | City          | Catalog is Bangalore. Unknown / out-of-city location → reject.                                                                                                           |
-| Location      | Area name (e.g. Indiranagar) or lat/lng inside the city.                                                                                                                 |
-| Area fallback | If the requested area has too few valid venues, consider the full Bangalore catalog and retain proximity as a ranking signal.                                          |
+| Location      | Bangalore area name only (for example, `Indiranagar`). Unknown areas are rejected.                                                                                   |
+| Area fallback | If the requested area has too few valid venues, consider the full Bangalore catalog and rank same-area venues first.                                                 |
 | Budget        | **Total for the group**, INR. Does not include transport.                                                                                                                |
 | Date          | Used as weekday vs weekend vs venue `open_days`. Not hour-by-hour.                                                                                                       |
 | Group size    | Number of people. Used only as capacity (`n <= venue.capacity`).                                                                                                         |
@@ -137,7 +137,7 @@ So 11–15 does not get a 5–12 playground (15 is too old) or a 21+ pub (11 is 
 
 ## 5. High-level architecture
 
-v1 is one modular application deployed as API, outbox-publisher, planner-worker, and callback-worker processes. PostgreSQL and RabbitMQ are shared infrastructure.
+v1 is one modular application with API, outbox-publisher, planner-worker, and callback-worker runtime roles. The local Docker setup combines the three worker roles in one worker container while keeping their handlers separate. PostgreSQL and RabbitMQ run as local infrastructure containers.
 
 ```mermaid
 flowchart TB
@@ -232,10 +232,12 @@ Happy path:
 1. Validate types and ranges (`1 <= age_min <= age_max`, group size ≥ 1, budget > 0, location in Bangalore).
 2. Load candidate venues (all city, or prefer the user’s area first).
 3. **Hard filter:** `open_days` matches date; `capacity >= group_size`; `venue.min_age <= age_min` and `venue.max_age >= age_max`.
-4. **Rank:** more preference-tag overlap wins; then closer area / distance.
+4. **Rank:** more preference-tag overlap wins; then same-area venues; then venue ID for deterministic ties.
 5. **Greedy:** walk the ranked list; take a venue if `cost <= remaining_budget`; stop at 3.
 6. If zero stops: fail with `budget` if the list was non-empty after step 3 but every cost was too high; otherwise the filter that emptied the list.
 7. Save and return.
+
+`POST /sync` invokes the planner once. It does not publish to RabbitMQ and the backend does not retry the complete sync operation. A transient database or server failure is returned to the client as `503` or `500`; the client decides whether to submit a new request.
 
 
 
@@ -291,7 +293,7 @@ Callbacks are delivered at least once and can arrive more than once or out of su
 
 ### 6.4 Load generator
 
-The repository includes a CLI load generator and a lightweight local callback receiver. The generator can configure request count, concurrency, mode, target URL, and test input while reusing the same deterministic planner payload for both modes.
+The planned CLI load generator and lightweight local callback receiver will configure request count, concurrency, mode, target URL, and test input while reusing the same deterministic planner payload for both modes.
 
 For sync it reports total sent, succeeded, failed, rejected, throughput, and end-to-end latency p50/p95/p99. For async it reports acknowledgement latency, callbacks received/missing/failed, and time-to-callback p50/p95/p99, correlated by request `id`. Percentiles use monotonic client-side timestamps. Machine-readable JSON plus a short console summary make runs repeatable and easy to include in the README/demo.
 
@@ -305,7 +307,7 @@ The documented load profile includes a normal run and an overload run that prove
 
 **Venue (catalog)**
 
-- identity, name, area, optional lat/lng
+- identity, name, area
 - tags
 - estimated_cost_inr (group, that stop)
 - capacity
@@ -350,7 +352,7 @@ The request change and corresponding outbox event are committed in the same Post
 **Soft (sort only)**
 
 - Preference tag overlap
-- Same area as the user, then nearer lat/lng if present
+- Same area as the user, then venue ID for deterministic ties
 
 **Age on the wire:** `age_min` + `age_max` (not an enum we must maintain). Clients may use bands such as 5–10, 11–15, 16–20, 21–99. We do **not** store a different finished plan per band. We used 16–20 instead of 15–20 so 15 is not in two buckets.
 
@@ -376,7 +378,8 @@ The request change and corresponding outbox event are committed in the same Post
 | RabbitMQ unavailable during outbox publish  | Keep outbox event unpublished and retry publication                                  |
 | Planner worker interrupted                  | RabbitMQ redelivers the unacknowledged message; idempotent worker resumes safely     |
 | Planner retry limit exceeded                | Dead-letter message and mark request failed with a safe error category               |
-| Planner or callback timeout                 | Retry only when classified transient; release bounded worker capacity                |
+| Sync database/server failure                | Return `503` or `500`; do not retry the complete sync request                         |
+| Async planner or callback timeout           | Retry only when classified transient; release bounded worker capacity                |
 | Unknown request id                          | `404`                                                                               |
 | List without valid `mode`                   | `4xx`                                                                               |
 

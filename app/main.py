@@ -1,0 +1,37 @@
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.api.routes import router
+from app.common.error_handlers import register_error_handlers
+from app.config.settings import load_settings
+from app.container import create_container
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = load_settings()
+    container = create_container(settings)
+    app.state.container = container
+    try:
+        await container.broker.connect()
+    except Exception:
+        logger.exception("RabbitMQ unavailable during API startup; async events remain protected by the outbox")
+    try:
+        yield
+    finally:
+        await container.close()
+
+
+def create_app() -> FastAPI:
+    settings = load_settings()
+    application = FastAPI(title=settings.application.name, lifespan=lifespan)
+    application.include_router(router)
+    register_error_handlers(application)
+    return application
+
+
+app = create_app()
