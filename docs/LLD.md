@@ -181,7 +181,7 @@ Success: `200 OK`
 }
 ```
 
-No feasible plan: `422 Unprocessable Entity`. The failed request is still persisted and the response uses the same request resource with `status=failed` and `failed_constraint` set.
+No feasible plan: `400 Bad Request`. The failed request is still persisted and the response uses the same request resource with `status=failed` and `failed_constraint` set.
 
 ### 4.3 `POST /async`
 
@@ -254,8 +254,8 @@ Returns process state and dependency checks. The API requires PostgreSQL. Rabbit
 
 | Condition | Status |
 |---|---:|
-| Invalid JSON or field value | `422` |
-| Invalid/unsafe callback URL | `422` |
+| Invalid JSON or field value | `400` |
+| Invalid/unsafe callback URL | `400` |
 | Unknown mode or malformed cursor | `400` |
 | Unknown request ID | `404` |
 | Async backlog limit reached | `429` with `Retry-After` |

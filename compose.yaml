@@ -47,6 +47,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
+      APP__CALLBACK__ALLOWED_HOSTS: '["callback-receiver"]'
     ports:
       - "8000:8000"
     depends_on:
@@ -66,11 +67,35 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       RABBITMQ_URL: ${RABBITMQ_URL}
+      APP__CALLBACK__ALLOWED_HOSTS: '["callback-receiver"]'
     command: ["python", "-m", "app.worker_main", "all"]
     depends_on:
       database-init:
         condition: service_completed_successfully
       rabbitmq:
+        condition: service_healthy
+
+  callback-receiver:
+    build: .
+    profiles: ["load-test"]
+    command: ["uvicorn", "load_generator.callback_receiver:app", "--host", "0.0.0.0", "--port", "9000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  load-generator:
+    build: .
+    profiles: ["load-test"]
+    entrypoint: ["python", "-m", "load_generator.main"]
+    command: ["--mode", "both", "--requests", "100", "--concurrency", "10"]
+    volumes:
+      - ./load-results:/results
+    depends_on:
+      api:
+        condition: service_healthy
+      callback-receiver:
         condition: service_healthy
 
 volumes:

@@ -98,6 +98,7 @@ class PostgresRequestRepository(RequestRepository):
                     payload={"schema_version": 1, "request_id": str(row.id)},
                 ))
             await session.flush()
+            await session.refresh(row)
             return request_entity(row)
 
     async def claim_for_planning(self, request_id: UUID) -> RequestRecord | None:
@@ -113,6 +114,7 @@ class PostgresRequestRepository(RequestRepository):
             row.processing_lease_until = now + timedelta(minutes=2)
             row.planner_attempts += 1
             await session.flush()
+            await session.refresh(row)
             return request_entity(row)
 
     async def mark_planner_failed(self, request_id: UUID, error_code: str) -> None:

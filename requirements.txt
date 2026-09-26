@@ -4,6 +4,5 @@ SQLAlchemy[asyncio]
 asyncpg
 aio-pika
 httpx
-pydantic-settings
 python-dotenv
 PyYAML

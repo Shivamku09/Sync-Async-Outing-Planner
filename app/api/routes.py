@@ -46,7 +46,7 @@ async def create_sync(body: PlanningRequest, request: Request):
     record = await _container(request).request_handler.handle_sync(body)
     response = _response(record)
     if record.status == PlanningStatus.FAILED:
-        return JSONResponse(status_code=422, content=response.model_dump(mode="json"))
+        return JSONResponse(status_code=400, content=response.model_dump(mode="json"))
     return response
 
 

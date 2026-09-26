@@ -36,6 +36,7 @@ class CallbackSettings(BaseModel):
     max_response_bytes: int = Field(default=65_536, ge=1)
     max_attempts: int = Field(default=4, ge=1)
     allow_localhost: bool = False
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class OutboxSettings(BaseModel):
@@ -81,6 +82,9 @@ def _coerce(value: str) -> Any:
     lowered = value.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
+    parsed = yaml.safe_load(value)
+    if isinstance(parsed, (list, dict)):
+        return parsed
     try:
         return int(value)
     except ValueError:

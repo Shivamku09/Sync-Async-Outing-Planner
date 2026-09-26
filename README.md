@@ -105,3 +105,6 @@ The second command reruns table creation and seed insertion. The initialization 
 - [Low-level design](docs/LLD.md)
 - [Database decision](docs/database-decision.md)
 - [RabbitMQ decision](docs/rabbitmq-vs-asyncio-queue.md)
+- [API testing guide](docs/API-TESTING.md)
+- [Load testing guide](docs/LOAD-TESTING.md)
+- [Loom walkthrough presentation](docs/Sync-Async-Outing-Planner-Loom-Walkthrough.pptx)

@@ -89,13 +89,3 @@ class HealthResponse(BaseModel):
     status: str
     postgresql: str
     rabbitmq: str
-
-
-class ErrorDetail(BaseModel):
-    code: str
-    message: str
-    request_id: UUID | None = None
-
-
-class ErrorResponse(BaseModel):
-    error: ErrorDetail

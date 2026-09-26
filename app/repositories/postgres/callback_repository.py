@@ -25,6 +25,7 @@ class PostgresCallbackRepository(CallbackRepository):
             row.callback_status = CallbackStatus.DELIVERING
             row.callback_lease_until = now + timedelta(minutes=1)
             await session.flush()
+            await session.refresh(row)
             return request_entity(row), row.callback_attempts
 
     async def save_result(self, request_id: UUID, attempt: int, result: CallbackAttemptResult) -> None:

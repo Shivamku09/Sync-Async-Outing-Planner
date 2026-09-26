@@ -49,7 +49,10 @@ def create_container(settings: Settings) -> ApplicationContainer:
     callback_repository = PostgresCallbackRepository(database.session_factory)
     outbox_repository = PostgresOutboxRepository(database.session_factory)
 
-    callback_security = DefaultCallbackSecurityService(settings.callback.allow_localhost)
+    callback_security = DefaultCallbackSecurityService(
+        settings.callback.allow_localhost,
+        settings.callback.allowed_hosts,
+    )
     planner_service = DefaultPlannerService(venue_repository, request_repository)
     request_service = DefaultRequestService(
         request_repository, planner_service, callback_security, settings.api.async_backlog_limit,
