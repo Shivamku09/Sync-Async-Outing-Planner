@@ -1,4 +1,4 @@
-# Outing Planner — High Level Design (draft v4)
+# Outing Planner — High Level Design (draft v5)
 
 **Product (one line):** Given location, date, group size, budget, preferences, and an **age range**, return a same-day outing plan in Bangalore that fits those constraints.
 
@@ -39,6 +39,8 @@ Clients may want the plan **immediately** (sync) or **submit and check later** (
 - Catalog of ~30–50 venues stored in our database.
 - Up to **3 stops**, greedy pick after filter + rank.
 - Python backend (framework choice belongs in LLD).
+- PostgreSQL for the venue catalog, request state, results, callback audit, and transactional outbox.
+- RabbitMQ for durable planner and callback job delivery.
 - A load generator for sync and async request storms, including a local callback receiver and summary statistics.
 ### Assumptions
 
@@ -56,7 +58,7 @@ Clients may want the plan **immediately** (sync) or **submit and check later** (
 | Determinism   | Same input + same catalog → same plan (no randomness in v1).                                                                                                             |
 | Preferences   | Preference tags affect ranking only; zero tag overlap does not fail an otherwise valid plan.                                                                             |
 | Async         | `POST /async` needs `callback_url`. Client can also **poll** `GET /requests/{id}`.                                                                                       |
-| Delivery      | Callback notification is best-effort in v1; the stored request returned by `GET /requests/{id}` is authoritative.                                                       |
+| Delivery      | RabbitMQ delivery is at least once; workers are idempotent. The stored request returned by `GET /requests/{id}` is authoritative.                                       |
 | Request list  | `mode` is required on `GET /requests`; results use bounded cursor pagination.                                                                                             |
 
 
@@ -84,8 +86,8 @@ Same constraint body for create: location, date, group size, age range, budget, 
 | `POST` | `/sync`                     | Generate and **wait**. `200` + request (with plan) or `4xx` + `failed_constraint`. Row is stored with `mode=sync`.                                        |
 | `POST` | `/async`                    | Same body + `callback_url`. `202` + `id` (`status=pending`). Engine runs in background; we POST result to callback. Client may poll `GET /requests/{id}`. |
 | `GET`  | `/requests?mode=sync|async` | **List** past requests of that mode (summaries). `mode` is required.                                                                                      |
-| `GET`  | `/requests/{id}`            | **Get one** request: input snapshot, status (`pending` / `succeeded` / `failed`), plan or error.                                                          |
-| `GET`  | `/healthz`                  | Process up (and DB reachable if we can check cheaply). `200` when healthy.                                                                                |
+| `GET`  | `/requests/{id}`            | **Get one** request: input snapshot, status (`pending` / `processing` / `succeeded` / `failed`), plan or error.                                           |
+| `GET`  | `/healthz`                  | Process and PostgreSQL health plus RabbitMQ connectivity status. `200` when required dependencies are healthy.                                          |
 
 
 `mode` on GET list is only a **filter**. Create mode is determined by the explicit `/sync` or `/async` endpoint.
@@ -100,7 +102,7 @@ Unknown `mode` → `4xx`. Missing request id → `404`.
 - Async: target p95 acknowledgement < 100 ms locally when capacity is available; callback timing is measured separately.
 - Survive the documented load-test profile without crashing or creating unbounded work.
 - Apply bounded concurrency, queue capacity, body-size limits, DB/HTTP connection limits, and timeouts.
-- Return `429 Too Many Requests` (with `Retry-After`) when the async queue is full; do not create a request row for rejected work.
+- Return `429 Too Many Requests` (with `Retry-After`) when the configured async backlog threshold is reached; do not create a request row for rejected work.
 - Persist enough timestamps and callback-attempt information to trace an async request end to end.
 - No third-party keys in v1.
 - Age is not DOB; input is `age_min` / `age_max`; do not log more location than needed.
@@ -135,47 +137,57 @@ So 11–15 does not get a 5–12 playground (15 is too old) or a 21+ pub (11 is 
 
 ## 5. High-level architecture
 
-v1 is **one service**. Boxes are logical, not microservices.
+v1 is one modular application deployed as API, outbox-publisher, planner-worker, and callback-worker processes. PostgreSQL and RabbitMQ are shared infrastructure.
 
 ```mermaid
 flowchart TB
   client[Client]
   api[Requests API]
+  outbox[Outbox Publisher]
+  mq[(RabbitMQ)]
+  plannerWorker[Planner Worker]
+  callbackWorker[Callback Worker]
   orch[Orchestrator]
-  queue[Bounded FIFO job queue]
   catalog[venues catalog]
   rules[Filter Rank Greedy]
-  reqs[requests store]
+  db[(PostgreSQL)]
   cb[Client callback URL]
 
   client --> api
   api -->|"POST /sync"| orch
-  api -->|"POST /async"| reqs
-  api -->|"enqueue after commit then 202"| queue
-  api -->|"GET list and GET by id"| reqs
-  queue -->|"bounded worker pool"| orch
+  api -->|"POST /async: request + outbox"| db
+  api -->|"GET list and GET by id"| db
+  db --> outbox
+  outbox -->|"publisher confirms"| mq
+  mq --> plannerWorker
+  plannerWorker --> orch
   orch --> catalog
   orch --> rules
-  orch --> reqs
-  orch --> cb
+  orch --> db
+  mq --> callbackWorker
+  callbackWorker --> cb
+  callbackWorker --> db
 ```
 
 
 
 
-| Piece          | Role                                                                        |
-| -------------- | --------------------------------------------------------------------------- |
-| Requests API   | Create (sync/async), list, get, health.                                     |
-| Requests store | One row per generate: `id`, `mode`, status, input, result, callback fields. |
-| Async runner   | Bounded in-process FIFO queue and fixed-size worker pool.                    |
-| Catalog        | Bangalore venues.                                                           |
-| Rule engine    | Filter → rank → greedy 3 stops. Shared.                                     |
-| Callback       | Extra notify for async; **GET by id** is the durable read.                  |
+| Piece             | Role                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| Requests API      | Create (sync/async), list, get, health.                                                  |
+| PostgreSQL        | Venues, requests, results, callback audit, and outbox events.                              |
+| Outbox publisher  | Publishes committed events to RabbitMQ and records publisher-confirmed delivery.           |
+| RabbitMQ          | Durable planner/callback queues, delayed retry queues, and dead-letter queues.              |
+| Planner worker    | Consumes planner jobs and invokes the shared orchestrator idempotently.                    |
+| Callback worker   | Delivers callbacks with bounded retries independently of planner capacity.                |
+| Catalog           | Bangalore venues stored in PostgreSQL.                                                     |
+| Rule engine       | Filter → rank → greedy 3 stops. Shared by sync and async paths.                            |
+| Callback endpoint | Receives async notification; **GET by id** remains the authoritative read.                 |
 
 
-v1 async runner: a bounded in-process FIFO queue with a fixed-size worker pool. The API first reserves queue capacity; if none is available, it returns `429` without creating a row. It then commits the `pending` row, enqueues the job into the reserved slot, and returns `202`. Queue size and worker count are configuration, not proportional to incoming traffic.
+For `/async`, the API writes the `pending` request and `PLAN_REQUESTED` outbox event in one PostgreSQL transaction, then returns `202`. The outbox publisher sends the request ID to a durable RabbitMQ queue using persistent messages and publisher confirms. This removes the database-to-broker dual-write gap.
 
-The in-process queue is intentionally not durable. If the process dies, accepted work can remain `pending`. On startup, v1 marks stale `pending` rows as `failed` with `worker_interrupted` so they are visible rather than stuck forever.
+Planner and callback workers use manual acknowledgements and bounded prefetch. A worker acknowledges a message only after its database changes commit. Unacknowledged messages are redelivered after worker failure, so handlers must be idempotent. Retry queues use delayed redelivery; messages that exceed the configured attempt limit move to a dead-letter queue and are reflected in persisted status.
 
 ---
 
@@ -233,23 +245,31 @@ Happy path:
 sequenceDiagram
   participant C as Client
   participant A as Requests API
-  participant R as requests
-  participant Q as Bounded queue
+  participant D as PostgreSQL
+  participant P as Outbox publisher
+  participant Q as RabbitMQ
   participant O as Orchestrator
+  participant CW as Callback worker
   participant W as Callback URL
 
   C->>A: POST /async plus callback_url
   A->>A: validate body and URL
-  A->>Q: reserve capacity
-  A->>R: insert and commit pending
-  A->>Q: enqueue into reserved slot
+  A->>D: transaction: pending request + PLAN_REQUESTED outbox
   A-->>C: 202 id
-  Q->>O: worker claims request
+  P->>D: claim unpublished outbox event
+  P->>Q: publish persistent message with confirm
+  P->>D: mark outbox event published
+  Q->>O: planner worker consumes request id
   O->>O: same engine as sync
-  O->>R: status succeeded or failed
-  O->>W: POST result payload
+  O->>D: transaction: result + CALLBACK_REQUESTED outbox
+  O->>Q: ACK planner message after commit
+  P->>Q: publish callback job with confirm
+  Q->>CW: consume callback job
+  CW->>W: POST result payload
+  CW->>D: save attempt and delivery status
+  CW->>Q: ACK after status commit
   C->>A: GET /requests/id
-  A->>R: load
+  A->>D: load
   A-->>C: status plus plan or error
 ```
 
@@ -257,9 +277,9 @@ sequenceDiagram
 
 Callback body should match the stored request result (plan or `failed_constraint`) plus `id`. The result and completion timestamp are committed before callback delivery starts.
 
-**Callback delivery (v1):** one POST with fixed connect/read timeouts. This is best-effort, effectively at-most-once delivery in normal operation; v1 does not automatically retry. Record the attempt, duration, HTTP status or error category, and mark delivery `delivered` or `callback_failed`. Planning status remains `succeeded`/`failed` independently of callback status. Client can always use `GET /requests/{id}`.
+**Callback delivery (v1):** callback work uses a separate RabbitMQ queue so a slow destination cannot consume planner capacity. Each attempt has fixed DNS/connect/read timeouts. Retry transient network errors, `408`, `429` (respecting `Retry-After` within configured bounds), and `5xx` responses with bounded exponential backoff. Do not retry other `4xx` responses. After the maximum attempts, dead-letter the job and mark callback status `dead_lettered`. Record every attempt, duration, HTTP status or error category. Planning status remains independent of callback status, and the client can always use `GET /requests/{id}`.
 
-Callbacks for different requests may arrive out of submission order because workers run concurrently. FIFO is the queue-start order, not a callback-completion guarantee. Consumers must correlate on `id` and treat it as an idempotency key.
+Callbacks are delivered at least once and can arrive more than once or out of submission order because workers run concurrently and failed messages are retried. Consumers must correlate on `id` and treat it as an idempotency key. No global callback-order guarantee is provided.
 
 **Callback safety / SSRF:** require `https` outside local development; allow only standard ports unless configured; resolve the hostname and reject loopback, private, link-local, multicast, reserved, and cloud-metadata destinations. Disable redirects, apply DNS/connect/read timeouts, cap the response body, and never forward internal credentials. Invalid URL → `4xx` on async POST, no row.
 
@@ -267,7 +287,7 @@ Callbacks for different requests may arrive out of submission order because work
 
 - `GET /requests?mode=sync|async&limit=…&cursor=…` — filter by required `mode`, newest first, with cursor pagination. `limit` has a small default and enforced maximum. Missing/invalid `mode`, `limit`, or cursor → `4xx`.
 - `GET /requests/{id}` — full request. Async `pending` returns `200` with `status=pending` and no plan yet (not `404`).
-- `GET /healthz` — `200` if the process can serve traffic; include a DB ping if cheap. No auth.
+- `GET /healthz` — reports process, PostgreSQL, and RabbitMQ connectivity. `200` only when dependencies required by that process are available. No auth.
 
 ### 6.4 Load generator
 
@@ -297,10 +317,22 @@ The documented load profile includes a normal run and an overload run that prove
 - id, mode (`sync` | `async`), planning status
 - input: location, date, group_size, age_min, age_max, prefs, budget
 - lifecycle: created_at, started_at, completed_at, updated_at
-- async: callback_url; callback status; attempt count; started/completed timestamps; duration; last HTTP status or error category
+- async: callback_url and callback status (`pending`, `delivering`, `delivered`, `failed`, `dead_lettered`)
 - result: plan stops + totals, or `failed_constraint`
 
 Plan stops live on the request (no separate `plans` table required in v1).
+
+**Callback attempt**
+
+- request id, attempt number, started/completed timestamps, duration
+- HTTP status or safe error category, outcome, next retry time
+
+**Outbox event**
+
+- event id, request id, event type (`PLAN_REQUESTED` or `CALLBACK_REQUESTED`)
+- payload/version, created timestamp, published timestamp, publish-attempt metadata
+
+The request change and corresponding outbox event are committed in the same PostgreSQL transaction. RabbitMQ messages carry the request/event ID; PostgreSQL remains the authoritative source for inputs and results.
 
 ---
 
@@ -338,10 +370,13 @@ Plan stops live on the request (no separate `plans` table required in v1).
 | Venues remain but none fit remaining budget | `budget`                                                                            |
 | Empty catalog (ops bug)                     | Sync 5xx; async callback with a server-error payload                                |
 | Invalid / unsafe `callback_url`             | 4xx on async POST, no row                                                           |
-| Callback unreachable                        | Request still succeeded/failed; `callback_failed`; client uses `GET /requests/{id}` |
-| Async queue at capacity                     | `429` + `Retry-After`; no request row is created                                    |
-| Worker process interrupted                  | Startup recovery marks stale `pending` requests failed with `worker_interrupted`    |
-| Planner or callback timeout                 | Persist the appropriate job/callback failure and release bounded worker capacity    |
+| Callback transient failure                  | Delayed bounded retry; planning result remains available through `GET`               |
+| Callback permanent/exhausted failure        | `failed` or `dead_lettered`; preserve attempt history                                |
+| Async backlog threshold reached             | `429` + `Retry-After`; no request row is created                                     |
+| RabbitMQ unavailable during outbox publish  | Keep outbox event unpublished and retry publication                                  |
+| Planner worker interrupted                  | RabbitMQ redelivers the unacknowledged message; idempotent worker resumes safely     |
+| Planner retry limit exceeded                | Dead-letter message and mark request failed with a safe error category               |
+| Planner or callback timeout                 | Retry only when classified transient; release bounded worker capacity                |
 | Unknown request id                          | `404`                                                                               |
 | List without valid `mode`                   | `4xx`                                                                               |
 
@@ -354,11 +389,14 @@ If several filters fail, report the first in order: location → date → group_
 
 ## 10. Scale, resilience, observability, cost, privacy
 
-- ~50 venues: one DB, no shard, no Redis required.
-- The async queue, worker pool, DB pool, and outbound HTTP pool are explicitly bounded. Backpressure is preferred over resource exhaustion.
+- ~50 venues: one PostgreSQL database, no shard, no Redis required.
+- RabbitMQ uses durable exchanges/queues, persistent messages, publisher confirms, manual acknowledgements, bounded prefetch, delayed retry queues, and dead-letter queues.
+- Planner workers, callback workers, PostgreSQL connection pools, and outbound HTTP pools are explicitly bounded. Backpressure is preferred over resource exhaustion.
+- Admission control rejects new async work when the unpublished/queued backlog reaches a configured threshold.
 - Index requests by primary key and by `(mode, created_at, id)` for lookup and cursor pagination.
+- Index unpublished outbox events for efficient claiming; concurrent publishers claim batches with row locking and `SKIP LOCKED`.
 - Apply maximum request-body size, input-list lengths, callback response size, and per-IP rate limits suitable for the demo.
-- Graceful shutdown stops admission, drains accepted jobs for a bounded period, and leaves/reclassifies unfinished rows for startup recovery.
+- Graceful shutdown stops consumption, completes work for a bounded period, and leaves unfinished messages unacknowledged for RabbitMQ redelivery.
 - Structured logs carry `request_id`, mode, planning status, callback status, durations, and safe error categories; never log the full callback URL or unnecessary location detail.
 - Metrics include request rate/error/latency, queue depth and saturation, active workers, job duration, callback latency and failures, rejected work, DB-pool saturation, and stale pending count.
 - Retain demo request/audit records for a configurable period and delete expired rows with a maintenance task.
@@ -372,7 +410,7 @@ If several filters fail, report the first in order: location → date → group_
 
 ## 11. Verification and assignment deliverables
 
-Tests cover planner rules (budget, group size, age range and deterministic ranking), API validation/status codes, persisted state transitions, acknowledgement-before-callback, callback success/timeout/unreachable cases, SSRF address classes and redirect behavior, queue saturation and `429`, concurrency ordering, stale-pending recovery, graceful shutdown, and load-summary calculations.
+Tests cover planner rules (budget, group size, age range and deterministic ranking), API validation/status codes, persisted state transitions, atomic request/outbox creation, publisher confirms, worker idempotency, redelivery after worker failure, acknowledgement after database commit, callback retry/dead-letter behavior, SSRF address classes, backlog admission and `429`, concurrency ordering, graceful shutdown, and load-summary calculations.
 
 The repository deliverables are:
 
