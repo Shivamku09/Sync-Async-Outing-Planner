@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from time import time
 from typing import Any
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Response
 
 
 app = FastAPI(title="Load Test Callback Receiver")
@@ -30,6 +30,15 @@ async def receive_callback(
                 "received_at": datetime.now(UTC).isoformat(),
                 "payload": payload,
             }
+
+
+@app.post("/callback/fail", status_code=503)
+async def fail_callback(
+    payload: dict[str, Any],
+    x_request_id: str | None = Header(default=None),
+) -> Response:
+    await receive_callback(payload, x_request_id)
+    return Response(status_code=503)
 
 
 @app.post("/reset", status_code=204)

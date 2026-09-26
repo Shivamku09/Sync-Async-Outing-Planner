@@ -57,7 +57,13 @@ def create_container(settings: Settings) -> ApplicationContainer:
     request_service = DefaultRequestService(
         request_repository, planner_service, callback_security, settings.api.async_backlog_limit,
     )
-    callback_service = DefaultCallbackService(callback_repository, callback_security, http_api_client)
+    callback_service = DefaultCallbackService(
+        callback_repository,
+        callback_security,
+        http_api_client,
+        settings.callback.max_attempts,
+        settings.callback.retry_delays_seconds,
+    )
     outbox_service = DefaultOutboxService(outbox_repository, broker, settings.outbox.batch_size)
 
     return ApplicationContainer(

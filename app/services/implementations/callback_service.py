@@ -4,7 +4,7 @@ from uuid import UUID
 from app.common.exceptions import InvalidCallbackURLError
 from app.repositories.interfaces.callback_repository import CallbackAttemptResult, CallbackRepository
 from app.services.interfaces.callback_security_service import CallbackSecurityService
-from app.services.interfaces.callback_service import CallbackService
+from app.services.interfaces.callback_service import CallbackDeliveryAction, CallbackDeliveryDecision, CallbackService
 from app.utils.http_api_client import HTTPAPIClient
 
 
@@ -14,19 +14,23 @@ class DefaultCallbackService(CallbackService):
         repository: CallbackRepository,
         security: CallbackSecurityService,
         http_client: HTTPAPIClient,
+        max_attempts: int,
+        retry_delays_seconds: list[int],
     ) -> None:
         self._repository = repository
         self._security = security
         self._http = http_client
+        self._max_attempts = max_attempts
+        self._retry_delays = retry_delays_seconds
 
-    async def deliver(self, request_id: UUID) -> bool:
+    async def deliver(self, request_id: UUID) -> CallbackDeliveryDecision:
         claimed = await self._repository.claim(request_id)
         if claimed is None:
-            return True
+            return CallbackDeliveryDecision(CallbackDeliveryAction.COMPLETE, 0)
         request, attempt = claimed
         if request.callback_url is None:
             await self._repository.mark_dead_lettered(request_id)
-            return True
+            return CallbackDeliveryDecision(CallbackDeliveryAction.DEAD_LETTER, attempt)
 
         started = monotonic()
         status: int | None = None
@@ -68,9 +72,18 @@ class DefaultCallbackService(CallbackService):
             retryable = True
             error = type(exc).__name__
 
+        exhausted = retryable and attempt >= self._max_attempts
+        retry_delay = None
+        if retryable and not exhausted:
+            retry_delay = self._retry_delays[attempt - 1]
         result = CallbackAttemptResult(
             delivered=delivered, retryable=retryable, http_status=status,
             error_category=error, duration_ms=int((monotonic() - started) * 1000),
+            exhausted=exhausted, next_retry_delay_seconds=retry_delay,
         )
         await self._repository.save_result(request_id, attempt, result)
-        return delivered or not retryable
+        if exhausted:
+            return CallbackDeliveryDecision(CallbackDeliveryAction.DEAD_LETTER, attempt)
+        if retryable:
+            return CallbackDeliveryDecision(CallbackDeliveryAction.RETRY, attempt)
+        return CallbackDeliveryDecision(CallbackDeliveryAction.COMPLETE, attempt)

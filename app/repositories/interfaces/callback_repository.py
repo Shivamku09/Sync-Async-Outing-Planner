@@ -12,6 +12,8 @@ class CallbackAttemptResult:
     http_status: int | None
     error_category: str | None
     duration_ms: int
+    exhausted: bool = False
+    next_retry_delay_seconds: int | None = None
 
 
 class CallbackRepository(ABC):

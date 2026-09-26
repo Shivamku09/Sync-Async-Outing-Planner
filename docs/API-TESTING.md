@@ -97,9 +97,16 @@ Expected final state:
 - `callback_status` becomes `delivered`
 - The response contains the generated plan
 
-## 5. Callback failure
+## 5. Callback retry and dead-letter handling
 
-This callback URL returns `404`, allowing callback-failure handling to be verified:
+Start the local callback receiver. Its `/callback/fail` endpoint always returns
+`503`, which is a retryable callback failure:
+
+```bash
+docker compose --profile load-test up -d callback-receiver
+```
+
+Submit an asynchronous request using that endpoint:
 
 ```bash
 curl -i -X POST http://localhost:8000/async \
@@ -112,7 +119,7 @@ curl -i -X POST http://localhost:8000/async \
     "age_max": 35,
     "budget_inr": 4000,
     "preferences": ["nature"],
-    "callback_url": "https://example.com/callback"
+    "callback_url": "http://callback-receiver:9000/callback/fail"
   }'
 ```
 
@@ -122,11 +129,24 @@ Poll the returned request ID:
 curl http://localhost:8000/requests/REPLACE_WITH_REQUEST_ID
 ```
 
-Expected final state:
+The first delivery happens immediately. The service then retries after 5, 30,
+and 120 seconds. Poll for approximately three minutes. Expected final state:
 
-- Planning can still be `succeeded`
-- `callback_status` becomes `failed`
+- Planning remains `succeeded`
+- Four callback attempts have been made
+- `callback_status` becomes `dead_lettered`
+- The final message is stored in `callback.dlq`
 - Planning success and callback delivery success remain separate states
+
+Transient network failures and HTTP `408`, `429`, and `5xx` responses are
+retried. Other `4xx` responses are permanent failures and are not retried.
+
+Inspect the persisted attempts:
+
+```bash
+docker compose exec postgres psql -U outing_app -d outing_planner -c \
+  "SELECT request_id, attempt_number, outcome, http_status, started_at, next_retry_at FROM callback_attempts WHERE request_id = 'REPLACE_WITH_REQUEST_ID' ORDER BY attempt_number;"
+```
 
 ## 6. No plan because the budget is too low
 
@@ -405,6 +425,9 @@ Expected queues include:
 
 - `planner.jobs`
 - `callback.jobs`
+- `callback.retry.5s`
+- `callback.retry.30s`
+- `callback.retry.120s`
 - `planner.dlq`
 - `callback.dlq`
 

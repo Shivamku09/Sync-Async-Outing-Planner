@@ -37,6 +37,9 @@ class PostgresCallbackRepository(CallbackRepository):
             if result.delivered:
                 row.callback_status = CallbackStatus.DELIVERED
                 outcome = "delivered"
+            elif result.exhausted:
+                row.callback_status = CallbackStatus.DEAD_LETTERED
+                outcome = "dead_lettered"
             elif result.retryable:
                 row.callback_status = CallbackStatus.PENDING
                 outcome = "retry_scheduled"
@@ -49,6 +52,10 @@ class PostgresCallbackRepository(CallbackRepository):
                 started_at=now - timedelta(milliseconds=result.duration_ms), completed_at=now,
                 duration_ms=result.duration_ms, http_status=result.http_status,
                 error_category=result.error_category, outcome=outcome,
+                next_retry_at=(
+                    now + timedelta(seconds=result.next_retry_delay_seconds)
+                    if result.next_retry_delay_seconds is not None else None
+                ),
             ))
 
     async def mark_dead_lettered(self, request_id: UUID) -> None:

@@ -17,6 +17,7 @@ callback:
   read_timeout_seconds: 5.0
   max_response_bytes: 65536
   max_attempts: 4
+  retry_delays_seconds: [5, 30, 120]
   allow_localhost: false
   allowed_hosts: []
 

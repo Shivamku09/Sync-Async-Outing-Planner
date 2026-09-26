@@ -108,3 +108,4 @@ The second command reruns table creation and seed insertion. The initialization 
 - [API testing guide](docs/API-TESTING.md)
 - [Load testing guide](docs/LOAD-TESTING.md)
 - [Loom walkthrough presentation](docs/Sync-Async-Outing-Planner-Loom-Walkthrough.pptx)
+- [Presentation speaker notes](docs/PRESENTATION-SPEAKER-NOTES.md)

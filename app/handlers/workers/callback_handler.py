@@ -1,5 +1,6 @@
+from app.broker.errors import DeadLetterMessageError, RetryMessageError
 from app.broker.rabbitmq.messages import CommandMessage
-from app.services.interfaces.callback_service import CallbackService
+from app.services.interfaces.callback_service import CallbackDeliveryAction, CallbackService
 
 
 class CallbackHandler:
@@ -8,6 +9,8 @@ class CallbackHandler:
 
     async def handle(self, payload: dict[str, object]) -> None:
         message = CommandMessage.model_validate(payload)
-        completed = await self._service.deliver(message.request_id)
-        if not completed:
-            raise RuntimeError("callback requires retry")
+        decision = await self._service.deliver(message.request_id)
+        if decision.action == CallbackDeliveryAction.RETRY:
+            raise RetryMessageError(decision.attempt)
+        if decision.action == CallbackDeliveryAction.DEAD_LETTER:
+            raise DeadLetterMessageError(str(message.request_id))

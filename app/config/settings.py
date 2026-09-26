@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -35,8 +35,17 @@ class CallbackSettings(BaseModel):
     read_timeout_seconds: float = Field(default=5.0, gt=0)
     max_response_bytes: int = Field(default=65_536, ge=1)
     max_attempts: int = Field(default=4, ge=1)
+    retry_delays_seconds: list[int] = Field(default_factory=lambda: [5, 30, 120])
     allow_localhost: bool = False
     allowed_hosts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_retry_schedule(self) -> "CallbackSettings":
+        if len(self.retry_delays_seconds) != self.max_attempts - 1:
+            raise ValueError("retry_delays_seconds must contain max_attempts - 1 entries")
+        if any(delay < 1 for delay in self.retry_delays_seconds):
+            raise ValueError("retry delays must be at least one second")
+        return self
 
 
 class OutboxSettings(BaseModel):
